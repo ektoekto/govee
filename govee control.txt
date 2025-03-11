@@ -1,0 +1,511 @@
+let messages = []
+let message
+let parameters
+let actionName
+let code
+let text
+let fill
+const apiKey = "xxxxxxxxxxx"
+const now = parseFloat(new Date().getTime());
+const now12h = now - 43200000
+const now1min = now - 60000;
+let govee = global.get("govee");
+let errorstate = global.get("govee.errorstate")
+let errorMessage
+let timestamp = global.get("govee.timestamp")
+
+if (govee && govee.messages !== undefined) {
+    messages = govee.messages
+}
+
+
+function generateUUID() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+        const r = Math.random() * 16 | 0;
+        const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+    });
+}
+
+function generateArray(min, max) {
+    return Array.from({ length: max - min + 1 }, (_, i) => min + i);
+}
+
+function rgbToGoveeColor(r, g, b) {
+    return ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
+}
+
+function hexToRgb(hex) {
+    hex = hex.replace(/^#/, '');
+    let r = parseInt(hex.substring(0, 2), 16);
+    let g = parseInt(hex.substring(2, 4), 16);
+    let b = parseInt(hex.substring(4, 6), 16);
+    return {
+        r: r,
+        g: g,
+        b: b
+    };
+}
+
+const goveeApiCodes = {
+    403: {
+        message: "Indicates that the Govee Developer API key is invalid.",
+        statusCode: 403,
+        text: "API key issue",
+        fill: "red"
+    },
+    401: {
+    message: "Authentication failed. API key is missing or invalid.",
+    statusCode: 401,
+    text: "API key issue",
+    fill: "red"
+    },
+    500: {
+        message: "Indicates an internal service error.",
+        statusCode: 500,
+        text: "Issue on server side",
+        fill: "red"
+    },
+    400: {
+        message: "Indicates that a request parameter does not comply with the associated constraints.",
+        statusCode: 400,
+        text: "Issue on request",
+        fill: "red"
+    },
+    200: {
+        message: "GET or POST successfull!",
+        statusCode: 200,
+        text: "Success",
+        fill: "green"
+    }
+};
+
+const actions = {
+    devices: function (obj){
+        let newMsg = {}
+        newMsg.method = "GET";
+        newMsg.url = "https://openapi.api.govee.com/router/api/v1/user/devices";
+        newMsg.headers = {
+            "Content-Type": "application/json",
+            "Govee-API-Key": apiKey
+        };
+        messages.push(newMsg);
+    },
+    control: function (obj) {
+        if (errorstate === 1){
+            return
+        }
+        for (let i = 0; i < govee.data.length; i++) {
+            let device = govee.data[i];
+
+            if (device.deviceName === obj.name) {
+                obj.sku = device.sku,
+                obj.device = device.device
+                obj.id = i
+                for (let j = 0; j < device.capabilities.length; j++) {
+                    let capabilities = device.capabilities[j]
+                    if (capabilities.instance === obj.instance){
+                        obj.type = capabilities.type
+                        if (obj.instance === "snapshot"){
+                            obj.snapshot = capabilities.parameters.options
+                        }
+                    }
+                }
+            }
+        }
+        const checks = [
+            { condition: !obj.device, message: "Didn't find device" },
+            { condition: !obj.instance, message: "Didn't find instance" },
+            { condition: !obj.sku, message: "missing SKU" },
+            { condition: !obj.type, message: "missing type" }
+        ];
+
+        if (obj.instance === "segmentedColorRgb"){
+            const colorInt = rgbToGoveeColor(obj.value.r, obj.value.g, obj.value.b)
+            let segment = obj.value.segment
+            if (!segment){
+                const minSegment = govee.data[obj.id].capabilities[4].parameters.fields[0].elementRange.min
+                const maxSegment = govee.data[obj.id].capabilities[4].parameters.fields[0].elementRange.max
+                segment = generateArray(minSegment,maxSegment)
+            }
+            obj.value = {
+                segment: segment,
+                rgb:parseFloat(colorInt)
+            }
+        }
+        if (obj.instance === "segmentedBrightness"){
+            let segment = obj.value.segment
+            if (!segment) {
+                const minSegment = govee.data[obj.id].capabilities[4].parameters.fields[0].elementRange.min
+                const maxSegment = govee.data[obj.id].capabilities[4].parameters.fields[0].elementRange.max
+                segment = generateArray(minSegment, maxSegment)
+            }
+            obj.value = {
+                segment: segment,
+                brightness: parseFloat(obj.value.brightness)
+            }
+        }
+
+        if (obj.instance === "snapshot"){
+            if (isNaN(obj.value) && obj.value && obj.snapshot){
+                for (let i = 0; i < obj.snapshot.length; i++) {
+                    let objOptions =  obj.snapshot[i]
+                    if (obj.value === objOptions.name){
+                        obj.value = objOptions.value
+                    }
+                }
+            }
+        }
+
+        // Loop through the checks and handle errors
+        for (let check of checks) {
+            if (check.condition) {
+                errorMessage = check.message;
+                if (errorstate === 0){
+                    errorstate = 2
+                }
+                if (errorstate === 3){
+                    errorstate = 4
+                }
+
+                break; // Exit the loop after the first error
+            } else {
+                errorstate = 0
+            }
+        }
+        let newMsg = {}
+        newMsg.method = "POST";
+        newMsg.url = "https://openapi.api.govee.com/router/api/v1/device/control";
+        newMsg.headers = {
+            "Content-Type": "application/json",
+            "Govee-API-Key": apiKey
+        };
+        newMsg.requestId = generateUUID();
+        newMsg.payload = {
+                "sku": obj.sku,
+                "device": obj.device,
+                "capability": {
+                    "type": obj.type,
+                    "instance": obj.instance,
+                    "value": obj.value
+                }
+            }
+        newMsg.payload = JSON.stringify({
+            requestId: newMsg.requestId,
+            payload: newMsg.payload
+        });
+        messages.push(newMsg);
+    },status: function (obj) {
+        for (let i = 0; i < govee.data.length; i++) {
+            let device = govee.data[i];
+
+            if (device.deviceName === obj.name) {
+                obj.sku = device.sku,
+                obj.device = device.device
+            }
+        }
+
+        const checks = [
+            { condition: !obj.device, message: "Didn't find device" },
+            { condition: !obj.sku, message: "missing SKU" }
+        ];
+
+        for (let check of checks) {
+            if (check.condition) {
+                errorMessage = check.message;
+                if (errorstate === 0){
+                    errorstate = 2
+                }
+                if (errorstate === 3){
+                    errorstate = 4
+                }
+                break;
+            } else {
+                errorstate = 0
+            }
+        }
+        let newMsg = {}
+        newMsg.method = "POST";
+        newMsg.url = "https://openapi.api.govee.com/router/api/v1/device/state";
+        newMsg.headers = {
+            "Content-Type": "application/json",
+            "Govee-API-Key": apiKey
+        };
+        newMsg.requestId = generateUUID();
+        newMsg.payload = {
+                "sku": obj.sku,
+                "device": obj.device,
+            }
+        newMsg.payload = JSON.stringify({
+            requestId: newMsg.requestId,
+            payload: newMsg.payload
+        });
+
+        messages.push(newMsg);
+    }
+}
+
+if (!govee && !errorstate){
+    errorstate = 1
+    govee = {}
+    global.set("govee", govee);
+    global.set("govee.errorstate", errorstate);
+    global.set("govee.timestamp", now);
+}
+
+if (isNaN(timestamp)) {
+    errorstate = 1
+    global.set("govee.errorstate", errorstate);
+    global.set("govee.timestamp", now);
+} else {
+    if (timestamp < now12h){
+        errorstate = 1
+    }
+}
+
+if (msg.statusCode !== undefined) {
+    const errorInfo = goveeApiCodes[msg.statusCode] || { text: "error " + msg.statusCode, fill: "red" };
+    text = errorInfo.text;
+    fill = errorInfo.fill;
+}
+
+if (govee.timestamp < now1min){
+    govee.response = []
+    global.set("govee.response", govee.response);
+    global.set("govee.timestamp", now);
+}
+
+if (msg.payload && msg.payload.code !== undefined){
+    code = msg.payload.code
+    if (code === 200){
+        if (msg.payload && msg.payload.data !== undefined){
+            global.set("govee.data", msg.payload.data);
+            if (errorstate === 1){
+                errorstate = 0;
+            }
+            if (errorstate === 2) {
+                errorstate = 3;
+            }
+        }
+        if (msg.payload && msg.payload.requestId && msg.payload.capability){
+            let thisResponseDevice
+            for (let l = 0; l < govee.response.length; l++) {
+                if (govee.response[l].rId === msg.payload.requestId){
+                    thisResponseDevice = govee.response[l].device
+                }
+            }
+            for (let i = 0; i < govee.data.length; i++) {
+                if (govee.data[i].device === thisResponseDevice){
+                    for (let j = 0; j < govee.data[i].capabilities.length; j++) {
+                        if (govee.data[i].capabilities[j].type === msg.payload.capability.type){
+                            if (msg.payload.capability.instance !== undefined){
+                                if (govee.data[i].capabilities[j].instance === msg.payload.capability.instance){
+                                    govee.data[i].capabilities[j].value = msg.payload.capability.value;
+                                } else {
+                                    govee.data[i].capabilities[j].value = undefined;
+                                }
+                            } else {
+                                govee.data[i].capabilities[j].value = msg.payload.capability.value;
+                            }
+                        } else {
+                            govee.data[i].capabilities[j].value = undefined;
+                        }
+                    }
+                }
+            }
+        global.set("govee.data", govee.data);
+        }
+
+    }
+    global.set("govee.timestamp", now);
+    if (code >= 400){
+        text = msg.payload.msg
+        fill = "yellow"
+    }
+}
+
+if (errorstate === 3){
+    msg.payload = global.get("govee.payloadMemory")
+}
+
+if (msg.payload && msg.payload.command !== undefined){
+    global.set("govee.payloadMemory", msg.payload);
+    messages = []
+    global.set("govee.messages", messages);
+    actionName = msg.payload.command
+    if (actionName === "multi"){
+        global.set("govee.messages", []);
+        if (msg.payload.powerSwitch){
+            parameters = {
+                name: msg.payload.name,
+                instance: "powerSwitch",
+                value: msg.payload.powerSwitch
+            }
+            actions["control"](parameters);
+        }
+        if (msg.payload.gradientToggle) {
+            parameters = {
+                name: msg.payload.name,
+                instance: "gradientToggle",
+                value: msg.payload.gradientToggle
+            }
+            actions["control"](parameters);
+        }
+        if (msg.payload.color) {
+            let value = hexToRgb(msg.payload.color)
+            parameters = {
+                name: msg.payload.name,
+                instance: "segmentedColorRgb",
+                value: value
+            }
+            actions["control"](parameters);
+        }
+        if (msg.payload.brightness) {
+            parameters = {
+                name: msg.payload.name,
+                instance: "brightness",
+                value: msg.payload.brightness
+                }
+            actions["control"](parameters);
+        }
+        if (msg.payload.colorTemp) {
+            parameters = {
+                name: msg.payload.name,
+                instance: "colorTemperatureK",
+                value: msg.payload.colorTemp
+                }
+            actions["control"](parameters);
+        }
+        if (msg.payload.snapshot) {
+            parameters = {
+                name: msg.payload.name,
+                instance: "snapshot",
+                value: msg.payload.snapshot
+            }
+            actions["control"](parameters);
+        }
+        if (msg.payload.segments) {
+            for (let i = 0; i < msg.payload.segments.length; i++) {
+                if (msg.payload.segments[i].color) {
+                    let value = hexToRgb(msg.payload.segments[i].color)
+                    value.segment = [msg.payload.segments[i].id]
+                    parameters = {
+                        name: msg.payload.name,
+                        instance: "segmentedColorRgb",
+                        value: value
+                    }
+                    actions["control"](parameters);
+                }
+                if (msg.payload.segmentedBrightness) {
+                    parameters = {
+                        name: msg.payload.name,
+                        instance: "segmentedBrightness",
+                        value: {
+                            brightness: msg.payload.segments[i].brightness,
+                            segment: [msg.payload.segments[i].id]
+                        }
+                    }
+                    actions["control"](parameters);
+                }
+
+            }
+        }
+
+
+    }
+    if (msg.payload && msg.payload.name!== undefined){
+        parameters = {
+            name : msg.payload.name,
+        } 
+    }
+
+    if (msg.payload && msg.payload.name && msg.payload.instance && msg.payload.value !== undefined){
+        parameters = {
+            name : msg.payload.name,
+            instance : msg.payload.instance,
+            value : msg.payload.value
+        } 
+    }
+}
+
+
+if (actions[actionName]) {
+    actions[actionName](parameters);
+    if (!text){
+        text = "Executing " + actionName
+        fill = "yellow"
+    }
+} else {
+    if (!msg.statusCode){
+        text = "No action"
+        fill = "red"
+    }
+}
+
+if (messages.length > 1){
+    text = "multi: " + messages.length + " actions left"
+    fill = "yellow"
+}
+
+if (msg.payload === ""){
+    text = "idle"
+    fill = "gray"
+}
+
+if (errorstate){
+
+    if (errorstate === 1){
+        global.set("govee.messages", messages);
+        messages = []
+        actions["devices"](parameters)
+        message = messages.shift();
+        text = "updating devices"
+        fill = "yellow"
+    }
+    if (errorstate === 2){
+        global.set("govee.messages", messages);
+        messages = []
+        actions["devices"](parameters)
+        message = messages.shift();
+        global.set("govee.errorMessage", errorMessage);
+        text = errorMessage
+        text = text + ". Updating..."
+        fill = "yellow"
+    }
+    if (errorstate === 3) {
+        message = messages.shift();
+        global.set("govee.messages", messages);
+    }
+    if (errorstate === 4) {
+        messages = []
+        global.set("govee.messages", messages);
+        text = global.get("govee.errorMessage");
+        text = text + ". Stopping!"
+        fill = "red"
+        errorstate = 0;
+        global.set("govee.errorMessage", undefined);
+    }
+} else {
+    message = messages.shift();
+    global.set("govee.messages", messages);
+}
+
+global.set("govee.errorstate", errorstate);
+
+if (message && message.payload) {
+    try {
+        const parsedPayload = JSON.parse(message.payload);
+        node.warn(parsedPayload);
+        const responsemsg = {
+            rId: parsedPayload.requestId,
+            device: parsedPayload.payload.device
+        };
+        govee.response.push(responsemsg)
+        global.set("govee.response", govee.response);
+    } catch (err) {
+        // Do nothing if payload is invalid
+    }
+}
+
+node.status({ fill: fill, shape: "dot", text: text});
+return message;

@@ -1,0 +1,502 @@
+[
+    {
+        "id": "function",
+        "type": "function",
+        "z": "6f0c45810e08f8f3",
+        "name": "govee function",
+        "func": "let messages = []\nlet message\nlet parameters\nlet actionName\nlet code\nlet text\nlet fill\nconst apiKey = \"xxxxxxxxx\"\nconst now = parseFloat(new Date().getTime());\nconst now12h = now - 43200000\nconst now1min = now - 60000;\nlet govee = global.get(\"govee\");\nlet errorstate = global.get(\"govee.errorstate\")\nlet errorMessage\nlet timestamp = global.get(\"govee.timestamp\")\n\nif (govee && govee.messages !== undefined) {\n    messages = govee.messages\n}\n\n\nfunction generateUUID() {\n    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {\n        const r = Math.random() * 16 | 0;\n        const v = c === 'x' ? r : (r & 0x3 | 0x8);\n        return v.toString(16);\n    });\n}\n\nfunction generateArray(min, max) {\n    return Array.from({ length: max - min + 1 }, (_, i) => min + i);\n}\n\nfunction rgbToGoveeColor(r, g, b) {\n    return ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);\n}\n\nfunction hexToRgb(hex) {\n    hex = hex.replace(/^#/, '');\n    let r = parseInt(hex.substring(0, 2), 16);\n    let g = parseInt(hex.substring(2, 4), 16);\n    let b = parseInt(hex.substring(4, 6), 16);\n    return {\n        r: r,\n        g: g,\n        b: b\n    };\n}\n\nconst goveeApiCodes = {\n    403: {\n        message: \"Indicates that the Govee Developer API key is invalid.\",\n        statusCode: 403,\n        text: \"API key issue\",\n        fill: \"red\"\n    },\n    401: {\n    message: \"Authentication failed. API key is missing or invalid.\",\n    statusCode: 401,\n    text: \"API key issue\",\n    fill: \"red\"\n    },\n    500: {\n        message: \"Indicates an internal service error.\",\n        statusCode: 500,\n        text: \"Issue on server side\",\n        fill: \"red\"\n    },\n    400: {\n        message: \"Indicates that a request parameter does not comply with the associated constraints.\",\n        statusCode: 400,\n        text: \"Issue on request\",\n        fill: \"red\"\n    },\n    200: {\n        message: \"GET or POST successfull!\",\n        statusCode: 200,\n        text: \"Success\",\n        fill: \"green\"\n    }\n};\n\nconst actions = {\n    devices: function (obj){\n        let newMsg = {}\n        newMsg.method = \"GET\";\n        newMsg.url = \"https://openapi.api.govee.com/router/api/v1/user/devices\";\n        newMsg.headers = {\n            \"Content-Type\": \"application/json\",\n            \"Govee-API-Key\": apiKey\n        };\n        messages.push(newMsg);\n    },\n    control: function (obj) {\n        if (errorstate === 1){\n            return\n        }\n        for (let i = 0; i < govee.data.length; i++) {\n            let device = govee.data[i];\n\n            if (device.deviceName === obj.name) {\n                obj.sku = device.sku,\n                obj.device = device.device\n                obj.id = i\n                for (let j = 0; j < device.capabilities.length; j++) {\n                    let capabilities = device.capabilities[j]\n                    if (capabilities.instance === obj.instance){\n                        obj.type = capabilities.type\n                        if (obj.instance === \"snapshot\"){\n                            obj.snapshot = capabilities.parameters.options\n                        }\n                    }\n                }\n            }\n        }\n        const checks = [\n            { condition: !obj.device, message: \"Didn't find device\" },\n            { condition: !obj.instance, message: \"Didn't find instance\" },\n            { condition: !obj.sku, message: \"missing SKU\" },\n            { condition: !obj.type, message: \"missing type\" }\n        ];\n\n        if (obj.instance === \"segmentedColorRgb\"){\n            const colorInt = rgbToGoveeColor(obj.value.r, obj.value.g, obj.value.b)\n            let segment = obj.value.segment\n            if (!segment){\n                const minSegment = govee.data[obj.id].capabilities[4].parameters.fields[0].elementRange.min\n                const maxSegment = govee.data[obj.id].capabilities[4].parameters.fields[0].elementRange.max\n                segment = generateArray(minSegment,maxSegment)\n            }\n            obj.value = {\n                segment: segment,\n                rgb:parseFloat(colorInt)\n            }\n        }\n        if (obj.instance === \"segmentedBrightness\"){\n            let segment = obj.value.segment\n            if (!segment) {\n                const minSegment = govee.data[obj.id].capabilities[4].parameters.fields[0].elementRange.min\n                const maxSegment = govee.data[obj.id].capabilities[4].parameters.fields[0].elementRange.max\n                segment = generateArray(minSegment, maxSegment)\n            }\n            obj.value = {\n                segment: segment,\n                brightness: parseFloat(obj.value.brightness)\n            }\n        }\n\n        if (obj.instance === \"snapshot\"){\n            if (isNaN(obj.value) && obj.value && obj.snapshot){\n                for (let i = 0; i < obj.snapshot.length; i++) {\n                    let objOptions =  obj.snapshot[i]\n                    if (obj.value === objOptions.name){\n                        obj.value = objOptions.value\n                    }\n                }\n            }\n        }\n\n        // Loop through the checks and handle errors\n        for (let check of checks) {\n            if (check.condition) {\n                errorMessage = check.message;\n                if (errorstate === 0){\n                    errorstate = 2\n                }\n                if (errorstate === 3){\n                    errorstate = 4\n                }\n\n                break; // Exit the loop after the first error\n            } else {\n                errorstate = 0\n            }\n        }\n        let newMsg = {}\n        newMsg.method = \"POST\";\n        newMsg.url = \"https://openapi.api.govee.com/router/api/v1/device/control\";\n        newMsg.headers = {\n            \"Content-Type\": \"application/json\",\n            \"Govee-API-Key\": apiKey\n        };\n        newMsg.requestId = generateUUID();\n        newMsg.payload = {\n                \"sku\": obj.sku,\n                \"device\": obj.device,\n                \"capability\": {\n                    \"type\": obj.type,\n                    \"instance\": obj.instance,\n                    \"value\": obj.value\n                }\n            }\n        newMsg.payload = JSON.stringify({\n            requestId: newMsg.requestId,\n            payload: newMsg.payload\n        });\n        messages.push(newMsg);\n    },status: function (obj) {\n        for (let i = 0; i < govee.data.length; i++) {\n            let device = govee.data[i];\n\n            if (device.deviceName === obj.name) {\n                obj.sku = device.sku,\n                obj.device = device.device\n            }\n        }\n\n        const checks = [\n            { condition: !obj.device, message: \"Didn't find device\" },\n            { condition: !obj.sku, message: \"missing SKU\" }\n        ];\n\n        for (let check of checks) {\n            if (check.condition) {\n                errorMessage = check.message;\n                if (errorstate === 0){\n                    errorstate = 2\n                }\n                if (errorstate === 3){\n                    errorstate = 4\n                }\n                break;\n            } else {\n                errorstate = 0\n            }\n        }\n        let newMsg = {}\n        newMsg.method = \"POST\";\n        newMsg.url = \"https://openapi.api.govee.com/router/api/v1/device/state\";\n        newMsg.headers = {\n            \"Content-Type\": \"application/json\",\n            \"Govee-API-Key\": apiKey\n        };\n        newMsg.requestId = generateUUID();\n        newMsg.payload = {\n                \"sku\": obj.sku,\n                \"device\": obj.device,\n            }\n        newMsg.payload = JSON.stringify({\n            requestId: newMsg.requestId,\n            payload: newMsg.payload\n        });\n\n        messages.push(newMsg);\n    }\n}\n\nif (!govee && !errorstate){\n    errorstate = 1\n    govee = {}\n    global.set(\"govee\", govee);\n    global.set(\"govee.errorstate\", errorstate);\n    global.set(\"govee.timestamp\", now);\n}\n\nif (isNaN(timestamp)) {\n    errorstate = 1\n    global.set(\"govee.errorstate\", errorstate);\n    global.set(\"govee.timestamp\", now);\n} else {\n    if (timestamp < now12h){\n        errorstate = 1\n    }\n}\n\nif (msg.statusCode !== undefined) {\n    const errorInfo = goveeApiCodes[msg.statusCode] || { text: \"error \" + msg.statusCode, fill: \"red\" };\n    text = errorInfo.text;\n    fill = errorInfo.fill;\n}\n\nif (govee.timestamp < now1min){\n    govee.response = []\n    global.set(\"govee.response\", govee.response);\n    global.set(\"govee.timestamp\", now);\n}\n\nif (msg.payload && msg.payload.code !== undefined){\n    code = msg.payload.code\n    if (code === 200){\n        if (msg.payload && msg.payload.data !== undefined){\n            global.set(\"govee.data\", msg.payload.data);\n            if (errorstate === 1){\n                errorstate = 0;\n            }\n            if (errorstate === 2) {\n                errorstate = 3;\n            }\n        }\n        if (msg.payload && msg.payload.requestId && msg.payload.capability){\n            let thisResponseDevice\n            for (let l = 0; l < govee.response.length; l++) {\n                if (govee.response[l].rId === msg.payload.requestId){\n                    thisResponseDevice = govee.response[l].device\n                }\n            }\n            for (let i = 0; i < govee.data.length; i++) {\n                if (govee.data[i].device === thisResponseDevice){\n                    for (let j = 0; j < govee.data[i].capabilities.length; j++) {\n                        if (govee.data[i].capabilities[j].type === msg.payload.capability.type){\n                            if (msg.payload.capability.instance !== undefined){\n                                if (govee.data[i].capabilities[j].instance === msg.payload.capability.instance){\n                                    govee.data[i].capabilities[j].value = msg.payload.capability.value;\n                                } else {\n                                    govee.data[i].capabilities[j].value = undefined;\n                                }\n                            } else {\n                                govee.data[i].capabilities[j].value = msg.payload.capability.value;\n                            }\n                        } else {\n                            govee.data[i].capabilities[j].value = undefined;\n                        }\n                    }\n                }\n            }\n        global.set(\"govee.data\", govee.data);\n        }\n\n    }\n    global.set(\"govee.timestamp\", now);\n    if (code >= 400){\n        text = msg.payload.msg\n        fill = \"yellow\"\n    }\n}\n\nif (errorstate === 3){\n    msg.payload = global.get(\"govee.payloadMemory\")\n}\n\nif (msg.payload && msg.payload.command !== undefined){\n    global.set(\"govee.payloadMemory\", msg.payload);\n    messages = []\n    global.set(\"govee.messages\", messages);\n    actionName = msg.payload.command\n    if (actionName === \"multi\"){\n        global.set(\"govee.messages\", []);\n        if (msg.payload.powerSwitch){\n            parameters = {\n                name: msg.payload.name,\n                instance: \"powerSwitch\",\n                value: msg.payload.powerSwitch\n            }\n            actions[\"control\"](parameters);\n        }\n        if (msg.payload.gradientToggle) {\n            parameters = {\n                name: msg.payload.name,\n                instance: \"gradientToggle\",\n                value: msg.payload.gradientToggle\n            }\n            actions[\"control\"](parameters);\n        }\n        if (msg.payload.color) {\n            let value = hexToRgb(msg.payload.color)\n            parameters = {\n                name: msg.payload.name,\n                instance: \"segmentedColorRgb\",\n                value: value\n            }\n            actions[\"control\"](parameters);\n        }\n        if (msg.payload.brightness) {\n            parameters = {\n                name: msg.payload.name,\n                instance: \"brightness\",\n                value: msg.payload.brightness\n                }\n            actions[\"control\"](parameters);\n        }\n        if (msg.payload.colorTemp) {\n            parameters = {\n                name: msg.payload.name,\n                instance: \"colorTemperatureK\",\n                value: msg.payload.colorTemp\n                }\n            actions[\"control\"](parameters);\n        }\n        if (msg.payload.snapshot) {\n            parameters = {\n                name: msg.payload.name,\n                instance: \"snapshot\",\n                value: msg.payload.snapshot\n            }\n            actions[\"control\"](parameters);\n        }\n        if (msg.payload.segments) {\n            for (let i = 0; i < msg.payload.segments.length; i++) {\n                if (msg.payload.segments[i].color) {\n                    let value = hexToRgb(msg.payload.segments[i].color)\n                    value.segment = [msg.payload.segments[i].id]\n                    parameters = {\n                        name: msg.payload.name,\n                        instance: \"segmentedColorRgb\",\n                        value: value\n                    }\n                    actions[\"control\"](parameters);\n                }\n                if (msg.payload.segmentedBrightness) {\n                    parameters = {\n                        name: msg.payload.name,\n                        instance: \"segmentedBrightness\",\n                        value: {\n                            brightness: msg.payload.segments[i].brightness,\n                            segment: [msg.payload.segments[i].id]\n                        }\n                    }\n                    actions[\"control\"](parameters);\n                }\n\n            }\n        }\n\n\n    }\n    if (msg.payload && msg.payload.name!== undefined){\n        parameters = {\n            name : msg.payload.name,\n        } \n    }\n\n    if (msg.payload && msg.payload.name && msg.payload.instance && msg.payload.value !== undefined){\n        parameters = {\n            name : msg.payload.name,\n            instance : msg.payload.instance,\n            value : msg.payload.value\n        } \n    }\n}\n\n\nif (actions[actionName]) {\n    actions[actionName](parameters);\n    if (!text){\n        text = \"Executing \" + actionName\n        fill = \"yellow\"\n    }\n} else {\n    if (!msg.statusCode){\n        text = \"No action\"\n        fill = \"red\"\n    }\n}\n\nif (messages.length > 1){\n    text = \"multi: \" + messages.length + \" actions left\"\n    fill = \"yellow\"\n}\n\nif (msg.payload === \"\"){\n    text = \"idle\"\n    fill = \"gray\"\n}\n\nif (errorstate){\n\n    if (errorstate === 1){\n        global.set(\"govee.messages\", messages);\n        messages = []\n        actions[\"devices\"](parameters)\n        message = messages.shift();\n        text = \"updating devices\"\n        fill = \"yellow\"\n    }\n    if (errorstate === 2){\n        global.set(\"govee.messages\", messages);\n        messages = []\n        actions[\"devices\"](parameters)\n        message = messages.shift();\n        global.set(\"govee.errorMessage\", errorMessage);\n        text = errorMessage\n        text = text + \". Updating...\"\n        fill = \"yellow\"\n    }\n    if (errorstate === 3) {\n        message = messages.shift();\n        global.set(\"govee.messages\", messages);\n    }\n    if (errorstate === 4) {\n        messages = []\n        global.set(\"govee.messages\", messages);\n        text = global.get(\"govee.errorMessage\");\n        text = text + \". Stopping!\"\n        fill = \"red\"\n        errorstate = 0;\n        global.set(\"govee.errorMessage\", undefined);\n    }\n} else {\n    message = messages.shift();\n    global.set(\"govee.messages\", messages);\n}\n\nglobal.set(\"govee.errorstate\", errorstate);\n\nif (message && message.payload) {\n    try {\n        const parsedPayload = JSON.parse(message.payload);\n        node.warn(parsedPayload);\n        const responsemsg = {\n            rId: parsedPayload.requestId,\n            device: parsedPayload.payload.device\n        };\n        govee.response.push(responsemsg)\n        global.set(\"govee.response\", govee.response);\n    } catch (err) {\n        // Do nothing if payload is invalid\n    }\n}\n\nnode.status({ fill: fill, shape: \"dot\", text: text});\nreturn message;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 500,
+        "y": 440,
+        "wires": [
+            [
+                "http_request"
+            ]
+        ]
+    },
+    {
+        "id": "http_request",
+        "type": "http request",
+        "z": "6f0c45810e08f8f3",
+        "name": "Govee API Call",
+        "method": "use",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 780,
+        "y": 440,
+        "wires": [
+            [
+                "d8e8e1912ab605f6",
+                "a40a892b29cb3021"
+            ]
+        ]
+    },
+    {
+        "id": "d8e8e1912ab605f6",
+        "type": "delay",
+        "z": "6f0c45810e08f8f3",
+        "name": "",
+        "pauseType": "delay",
+        "timeout": "300",
+        "timeoutUnits": "milliseconds",
+        "rate": "1",
+        "nbRateUnits": "1",
+        "rateUnits": "second",
+        "randomFirst": "1",
+        "randomLast": "5",
+        "randomUnits": "seconds",
+        "drop": false,
+        "allowrate": false,
+        "outputs": 1,
+        "x": 990,
+        "y": 440,
+        "wires": [
+            [
+                "function"
+            ]
+        ]
+    },
+    {
+        "id": "d7386c3d9fb353ec",
+        "type": "inject",
+        "z": "6f0c45810e08f8f3",
+        "name": "Devices",
+        "props": [
+            {
+                "p": "payload.command",
+                "v": "devices",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "x": 290,
+        "y": 400,
+        "wires": [
+            [
+                "function"
+            ]
+        ]
+    },
+    {
+        "id": "771f51940b109654",
+        "type": "function",
+        "z": "6f0c45810e08f8f3",
+        "name": "check govee global",
+        "func": "\nmsg.payload = global.get(\"govee\");\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 430,
+        "y": 600,
+        "wires": [
+            [
+                "6efe11d47590f510"
+            ]
+        ]
+    },
+    {
+        "id": "6efe11d47590f510",
+        "type": "debug",
+        "z": "6f0c45810e08f8f3",
+        "name": "global",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 650,
+        "y": 600,
+        "wires": []
+    },
+    {
+        "id": "fd22cca139612053",
+        "type": "inject",
+        "z": "6f0c45810e08f8f3",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 220,
+        "y": 600,
+        "wires": [
+            [
+                "771f51940b109654"
+            ]
+        ]
+    },
+    {
+        "id": "a40a892b29cb3021",
+        "type": "debug",
+        "z": "6f0c45810e08f8f3",
+        "name": "debug 12",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 980,
+        "y": 400,
+        "wires": []
+    },
+    {
+        "id": "1b4038e426bf3430",
+        "type": "inject",
+        "z": "6f0c45810e08f8f3",
+        "name": "Off",
+        "props": [
+            {
+                "p": "payload.command",
+                "v": "control",
+                "vt": "str"
+            },
+            {
+                "p": "payload.name",
+                "v": "Light1",
+                "vt": "str"
+            },
+            {
+                "p": "payload.instance",
+                "v": "powerSwitch",
+                "vt": "str"
+            },
+            {
+                "p": "payload.value",
+                "v": "0",
+                "vt": "num"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "x": 290,
+        "y": 320,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "dc3a76a614275182",
+        "type": "inject",
+        "z": "6f0c45810e08f8f3",
+        "name": "State",
+        "props": [
+            {
+                "p": "payload.command",
+                "v": "status",
+                "vt": "str"
+            },
+            {
+                "p": "payload.name",
+                "v": "Table",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "x": 290,
+        "y": 240,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "9af2d6c25ab711b7",
+        "type": "inject",
+        "z": "6f0c45810e08f8f3",
+        "name": "On",
+        "props": [
+            {
+                "p": "payload.command",
+                "v": "control",
+                "vt": "str"
+            },
+            {
+                "p": "payload.name",
+                "v": "Table",
+                "vt": "str"
+            },
+            {
+                "p": "payload.instance",
+                "v": "powerSwitch",
+                "vt": "str"
+            },
+            {
+                "p": "payload.value",
+                "v": "1",
+                "vt": "num"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "x": 290,
+        "y": 280,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "7facdf410c96cc88",
+        "type": "inject",
+        "z": "6f0c45810e08f8f3",
+        "name": "snapshot",
+        "props": [
+            {
+                "p": "payload.command",
+                "v": "control",
+                "vt": "str"
+            },
+            {
+                "p": "payload.name",
+                "v": "Light1",
+                "vt": "str"
+            },
+            {
+                "p": "payload.instance",
+                "v": "snapshot",
+                "vt": "str"
+            },
+            {
+                "p": "payload.value",
+                "v": "Night",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "x": 280,
+        "y": 200,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "18bdd12c115bbf79",
+        "type": "inject",
+        "z": "6f0c45810e08f8f3",
+        "name": "segment color",
+        "props": [
+            {
+                "p": "payload.command",
+                "v": "control",
+                "vt": "str"
+            },
+            {
+                "p": "payload.name",
+                "v": "Light1",
+                "vt": "str"
+            },
+            {
+                "p": "payload.instance",
+                "v": "segmentedColorRgb",
+                "vt": "str"
+            },
+            {
+                "p": "payload.value.r",
+                "v": "0",
+                "vt": "num"
+            },
+            {
+                "p": "payload.value.g",
+                "v": "0",
+                "vt": "str"
+            },
+            {
+                "p": "payload.value.b",
+                "v": "255",
+                "vt": "str"
+            },
+            {
+                "p": "payload.value.segment",
+                "v": "[0,1,2]",
+                "vt": "json"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "x": 270,
+        "y": 160,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "ad771e9b13554054",
+        "type": "inject",
+        "z": "6f0c45810e08f8f3",
+        "name": "segment brightness",
+        "props": [
+            {
+                "p": "payload.command",
+                "v": "control",
+                "vt": "str"
+            },
+            {
+                "p": "payload.name",
+                "v": "Table",
+                "vt": "str"
+            },
+            {
+                "p": "payload.instance",
+                "v": "segmentedBrightness",
+                "vt": "str"
+            },
+            {
+                "p": "payload.value.brightness",
+                "v": "10",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "x": 250,
+        "y": 120,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "fc3a98b6a726011d",
+        "type": "inject",
+        "z": "6f0c45810e08f8f3",
+        "name": "gradient",
+        "props": [
+            {
+                "p": "payload.command",
+                "v": "control",
+                "vt": "str"
+            },
+            {
+                "p": "payload.name",
+                "v": "Light1",
+                "vt": "str"
+            },
+            {
+                "p": "payload.instance",
+                "v": "gradientToggle",
+                "vt": "str"
+            },
+            {
+                "p": "payload.value",
+                "v": "1",
+                "vt": "num"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "x": 280,
+        "y": 360,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "bba62a8aeecdfafd",
+        "type": "template",
+        "z": "6f0c45810e08f8f3",
+        "name": "color and brightness",
+        "field": "payload",
+        "fieldType": "msg",
+        "format": "json",
+        "syntax": "mustache",
+        "template": "{\n    \"command\": \"multi\",\n    \"name\": \"Light1\",\n    \"powerSwitch\": 1,\n    \"gradientToggle\": 1,\n    \"color\": \"#FF0000\",\n    \"brightness\": 10\n}",
+        "output": "json",
+        "x": 520,
+        "y": 180,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "8387eaa369172bf3",
+        "type": "template",
+        "z": "6f0c45810e08f8f3",
+        "name": "segment rgb",
+        "field": "payload",
+        "fieldType": "msg",
+        "format": "json",
+        "syntax": "mustache",
+        "template": "{\n    \"command\": \"multi\",\n    \"name\": \"Pöytä\",\n    \"powerSwitch\": 1,\n    \"gradientToggle\": 0,\n    \"segments\": [\n        {\n            \"id\": 0,\n            \"color\": \"#0000FF\",\n            \"brightness\": 70\n        },\n        {\n            \"id\": 1,\n            \"color\": \"#0000FF\",\n            \"brightness\": 70\n        },\n        {\n            \"id\": 2,\n            \"color\": \"#0000FF\",\n            \"brightness\": 70\n        },\n        {\n            \"id\": 3,\n            \"color\": \"#0000FF\",\n            \"brightness\": 70\n        },\n        {\n            \"id\": 4,\n            \"color\": \"#FF0000\",\n            \"brightness\": 70\n        },\n        {\n            \"id\": 5,\n            \"color\": \"#FF0000\",\n            \"brightness\": 70\n        },\n        {\n            \"id\": 6,\n            \"color\": \"#FF0000\",\n            \"brightness\": 70\n        },\n        {\n            \"id\": 7,\n            \"color\": \"#FF0000\",\n            \"brightness\": 70\n        },\n        {\n            \"id\": 8,\n            \"color\": \"#FF0000\",\n            \"brightness\": 70\n        },\n        {\n            \"id\": 9,\n            \"color\": \"#008000\",\n            \"brightness\": 70\n        },\n        {\n            \"id\": 10,\n            \"color\": \"#008000\",\n            \"brightness\": 70\n        },\n        {\n            \"id\": 11,\n            \"color\": \"#008000\",\n            \"brightness\": 70\n        },\n        {\n            \"id\": 12,\n            \"color\": \"#008000\",\n            \"brightness\": 70\n        },\n        {\n            \"id\": 13,\n            \"color\": \"#008000\",\n            \"brightness\": 70\n        },\n        {\n            \"id\": 14,\n            \"color\": \"#008000\",\n            \"brightness\": 70\n        }\n    ]\n}",
+        "output": "json",
+        "x": 490,
+        "y": 260,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "9cd1a9a670a2457f",
+        "type": "template",
+        "z": "6f0c45810e08f8f3",
+        "name": "snapshot and brightness",
+        "field": "payload",
+        "fieldType": "msg",
+        "format": "json",
+        "syntax": "mustache",
+        "template": "{\n    \"command\": \"multi\",\n    \"name\": \"Light1\",\n    \"powerSwitch\": 1,\n    \"gradientToggle\": 1,\n    \"snapshot\": 2335341,\n    \"brightness\": 10\n}",
+        "output": "json",
+        "x": 530,
+        "y": 220,
+        "wires": [
+            []
+        ]
+    }
+]
